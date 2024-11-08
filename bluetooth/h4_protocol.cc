@@ -23,6 +23,7 @@
 #include <asm/byteorder.h>
 #include <linux/usb/ch9.h>
 #include <libusb/libusb.h>
+#include <linux/rfkill.h>
 
 #define HCI_COMMAND_COMPLETE_EVT 0x0E
 #define HCI_COMMAND_STATUS_EVT 0x0F
@@ -201,6 +202,37 @@ void H4Protocol::OnPacketReady() {
   hci_packet_type_ = HCI_PACKET_TYPE_UNKNOWN;
 }
 
+/* This function checks whether BT HCI interface
+ * is active or not, before throwing the FATAL error
+ * because of malformed packet from controller.
+ */
+static bool checkIsHciInterfaceUp() {
+  struct rfkill_event rfevent;
+  int fd;
+  bool isBtInterfaceUp = false;
+
+  ALOGD("%s", __func__);
+
+  fd = open("/dev/rfkill", O_RDONLY | O_NONBLOCK);
+  if (fd < 0) {
+    ALOGE("Unable to open /dev/rfkill");
+    return true;
+  }
+
+  memset(&rfevent, 0, sizeof(struct rfkill_event));
+
+  while (sizeof(rfevent) == read(fd, &rfevent, sizeof(rfevent))) {
+    ALOGD("Event: idx=%u, type=%u, op=%u, soft=%u, hard=%u\n",
+                    rfevent.idx, rfevent.type, rfevent.op,
+                    rfevent.soft, rfevent.hard);
+    if (rfevent.type == RFKILL_TYPE_BLUETOOTH) {
+        isBtInterfaceUp = true;
+    }
+  }
+
+  close(fd);
+  return isBtInterfaceUp;
+}
 
 typedef struct
 {
@@ -243,8 +275,10 @@ void H4Protocol::OnDataReady(int fd) {
         if (hci_packet_type_ != HCI_PACKET_TYPE_ACL_DATA &&
             hci_packet_type_ != HCI_PACKET_TYPE_SCO_DATA &&
             hci_packet_type_ != HCI_PACKET_TYPE_EVENT) {
-          LOG_ALWAYS_FATAL("%s: Unimplemented packet type %d", __func__,
-                           static_cast<int>(hci_packet_type_));
+            if (checkIsHciInterfaceUp()) {
+                LOG_ALWAYS_FATAL("%s: Unimplemented packet type %d", __func__,
+                                static_cast<int>(hci_packet_type_));
+            }
         } else {
             if(tpkt.data()[1] == HCI_COMMAND_COMPLETE_EVT) {
                 ALOGD("%s Command complete event ncmds = %d",
